@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Embedding benchmark progress and logs
+checkpoints/
+logs/
