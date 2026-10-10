@@ -1,0 +1,281 @@
+"""Build 200 human-typed job queries for retrieval validation.
+
+Each query is something a person might type. It stays close to one official
+title in the spreadsheet, and that title's id is the expected match.
+The queries are not passed through the cleaner. Normalize them the same way
+as the indexed titles before you embed a search.
+
+Run:
+    python generate_validation_queries.py
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import openpyxl
+from openpyxl.styles import Font
+
+ROOT = Path(__file__).resolve().parent
+SOURCE_XLSX = ROOT / "test_data_for_local_embedding_models.xlsx"
+OUTPUT_XLSX = ROOT / "validation_human_job_queries.xlsx"
+
+# gold_id, query a person might type, what kind of change it is.
+QUERIES: list[tuple[int, str, str]] = [
+    (16227, "غوره گیر دستی", "shorter"),
+    (16253, "متخصص ارتز و بریس", "paraphrase"),
+    (16281, "اپراتور دوربین تصویر", "extra word"),
+    (16306, "بازرس گمرکات", "colloquial"),
+    (16334, "پارچه فروش", "paraphrase"),
+    (16356, "تحلیلگر اوراق قرضه", "spacing"),
+    (16382, "تعمیرکار برج خنک کن", "shorter"),
+    (16407, "تعمیرکار میز و صندلی فلزی اداری", "paraphrase"),
+    (16429, "تنیسور حرفه ای", "colloquial"),
+    (16452, "تکنسین بانک خون", "paraphrase"),
+    (16472, "تکنسین رادیولوژی", "paraphrase"),
+    (16496, "نقشه بردار زمینی", "paraphrase"),
+    (16522, "تکنسین مهندسی مکانیک", "paraphrase"),
+    (16554, "حکیم باشی قدیمی", "extra word"),
+    (16585, "جراح دامپزشک", "reordered"),
+    (16612, "شیرینی پز دسر", "reordered"),
+    (16642, "نویسنده رمان", "reordered"),
+    (16665, "کسی که کابل میریسه", "colloquial"),
+    (16698, "زمین شناس آب", "shorter"),
+    (16727, "متخصص پرتودرمانی سرطان", "paraphrase"),
+    (16753, "هنرمند شبیه گردان", "extra word"),
+    (16777, "طراح سیستم نرم افزار کامپیوتر", "paraphrase"),
+    (16815, "عضو کمیته ورزش", "shorter"),
+    (16852, "قاضی کل کشور", "extra word"),
+    (16877, "مامور دادرسی دادگاه", "extra word"),
+    (16902, "پلیس گشت", "reordered"),
+    (16925, "بازی درمانگر", "paraphrase"),
+    (16947, "کارشناس ساخت اینترنت", "paraphrase"),
+    (16970, "متخصص شیمی مواد غذایی", "shorter"),
+    (16999, "مترجم متن", "paraphrase"),
+    (17025, "اپراتور حفاری جهت دار", "paraphrase"),
+    (17051, "مسئول پذیرش غیر از هتل", "paraphrase"),
+    (17093, "مدیر سونا", "shorter"),
+    (17128, "مدیر سایت", "paraphrase"),
+    (17158, "مشاور اقیانوس", "shorter"),
+    (17182, "ناخدا کشتی نجات", "paraphrase"),
+    (17207, "ملازم شخصی", "extra word"),
+    (17231, "مهندس صنعت هواپیما", "extra word"),
+    (17254, "مهندس توزیع نیروی برق", "extra word"),
+    (17281, "مهندس ساخت سد", "paraphrase"),
+    (17302, "مهندس طراحی تجهیزات برقی", "paraphrase"),
+    (17332, "نقشه بردار هیدروگرافی", "paraphrase"),
+    (17354, "مهندس یدک کش کشتی", "paraphrase"),
+    (17377, "نصاب آیفون تصویری", "shorter"),
+    (17411, "وکیل پرونده حقوقی", "paraphrase"),
+    (17442, "متخصص بهداشت دهان و دندان", "shorter"),
+    (17469, "کارآموز دادگستری", "paraphrase"),
+    (17494, "کارشناس امنیت کامپیوتر", "paraphrase"),
+    (17520, "کارشناس رصد مطبوعات", "paraphrase"),
+    (17544, "کارشناس سخت افزار کامپیوتر", "paraphrase"),
+    (17568, "کارشناس GIS عمران", "paraphrase"),
+    (17597, "کارشناس آب های زیرزمینی", "paraphrase"),
+    (17618, "سوخت رسان هواپیما", "paraphrase"),
+    (17648, "کاپیتان پرواز", "paraphrase"),
+    (17671, "نویسنده گزارش خبری", "paraphrase"),
+    (17703, "پاتولوژیست حیوانات", "paraphrase"),
+    (17728, "معلم خصوصی موسیقی", "paraphrase"),
+    (17758, "اپراتور ضبط و پخش رادیو تلویزیون", "shorter"),
+    (17784, "بازرس حقوق و دستمزد", "paraphrase"),
+    (17813, "برقکار قطار", "spacing"),
+    (17841, "آنالیزور آزمایشگاه", "paraphrase"),
+    (17867, "مجسمه تراش", "reordered"),
+    (17887, "تعمیرکار ترانس برق", "colloquial"),
+    (17913, "مکانیک ماشین آلات راهسازی", "paraphrase"),
+    (17938, "تعمیرکار کیلومتر شمار ماشین", "paraphrase"),
+    (17960, "تکنسین آزمایشگاه آب و فاضلاب", "extra word"),
+    (17990, "تکنسین میکروب شناسی", "paraphrase"),
+    (18013, "تکنسین فیلمبرداری دیجیتال", "paraphrase"),
+    (18036, "تکنسین سخت افزار کامپیوتر", "paraphrase"),
+    (18061, "تکنسین سفال و سرامیک", "shorter"),
+    (18086, "تکنسین لابراتوار دندانسازی", "paraphrase"),
+    (18113, "پشتیبان شبکه", "shorter"),
+    (18137, "تکنسین مهندسی نساجی", "paraphrase"),
+    (18167, "خردکن انفیه دستی", "colloquial"),
+    (18190, "دانشمند زمین شناسی", "shorter"),
+    (18217, "فروشنده دکه خیابانی", "paraphrase"),
+    (18249, "لوکوموتیوران", "paraphrase"),
+    (18280, "سرویس کار دستگاه پنوماتیک", "paraphrase"),
+    (18311, "رئیس دادگاه بخش", "same words"),
+    (18349, "زبانشناس عمومی", "paraphrase"),
+    (18374, "سازنده تخت فلزی بیمارستان", "reordered"),
+    (18397, "مسئول ایمنی معدن", "paraphrase"),
+    (18420, "سرپیشخدمت رستوران", "extra word"),
+    (18440, "مونتاژکار ماشین چوب بری", "paraphrase"),
+    (18466, "شکارچی برای مصرف شخصی", "paraphrase"),
+    (18509, "ظاهرکننده عکس و فیلم", "paraphrase"),
+    (18535, "غواص بدنه کشتی", "paraphrase"),
+    (18559, "قاضی دادگستری", "paraphrase"),
+    (18585, "لیتوگراف چاپخانه", "spacing"),
+    (18613, "مامور گشت آتش نشانی جنگل", "spacing"),
+    (18641, "متخصص هیستولوژی", "paraphrase"),
+    (18664, "متخصص ساخت مولتی مدیا", "paraphrase"),
+    (18689, "دکتر پوست", "colloquial"),
+    (18715, "مسئول تربیت بدنی", "paraphrase"),
+    (18745, "مسئول ترافیک باند فرودگاه", "paraphrase"),
+    (18768, "اپراتور دستگاه برش لاستیک", "paraphrase"),
+    (18793, "اپراتور شن کش راهسازی", "paraphrase"),
+    (18814, "اپراتور پخش رادیو و تلویزیون", "paraphrase"),
+    (18839, "ضبط و تکثیر نوار کاست", "paraphrase"),
+    (18862, "اپراتور ماشین لباسشویی", "paraphrase"),
+    (16228, "لیمو گیر دستی", "shorter"),
+    (16258, "کارشناس ارزیابی اموال", "paraphrase"),
+    (16284, "اپراتور میکروفون و بلندگو", "colloquial"),
+    (16308, "فوتسالیست حرفه ای", "colloquial"),
+    (16337, "بهداشتکار دهان و دندان", "paraphrase"),
+    (16358, "تحلیلگر غلات", "shorter"),
+    (16386, "تعمیرکار کولر و تهویه", "paraphrase"),
+    (16409, "تعمیرکار ماشین حساب رومیزی", "extra word"),
+    (16432, "تهیه کننده میکروفیش", "paraphrase"),
+    (16454, "تکنسین سونوگرافی شکم", "extra word"),
+    (16475, "تکنسین وسایل ارتوپدی", "shorter"),
+    (16499, "تکنسین هومیوپاتی دارو", "extra word"),
+    (16524, "تکنسین کاغذسازی", "paraphrase"),
+    (16558, "تتو آرتیست", "colloquial"),
+    (16588, "داور تجدیدنظر", "paraphrase"),
+    (16616, "دندانپزشک تجربی", "spacing"),
+    (16646, "روانشناس درمانگر", "paraphrase"),
+    (16670, "رئیس بازرسی زندان", "shorter"),
+    (16700, "نگهبان زندان", "paraphrase"),
+    (16729, "سرملوان کشتی", "extra word"),
+    (16755, "شطرنج باز حرفه ای باشگاه", "extra word"),
+    (16779, "طراح شهرسازی", "paraphrase"),
+    (16818, "عکاس آتلیه", "colloquial"),
+    (16855, "کارشناس پزشکی قانونی", "paraphrase"),
+    (16879, "مامور آتش نشانی", "paraphrase"),
+    (16904, "مامور کنتور گاز", "spacing"),
+    (16927, "متخصص سئو", "colloquial"),
+    (16949, "متخصص طراحی وب سایت", "paraphrase"),
+    (16972, "متخصص صنعت پلاستیک", "paraphrase"),
+    (17001, "متصدی آچار حفاری برقی", "shorter"),
+    (17028, "اپراتور دستگاه آسیاب قهوه", "paraphrase"),
+    (17055, "اپراتور برج خنک کننده", "paraphrase"),
+    (17095, "سرپرست خشکشویی صنعتی", "spacing"),
+    (17132, "مدیر پردازش داده", "shorter"),
+    (17160, "مشاور ایدز", "colloquial"),
+    (17186, "معلم خصوصی آواز", "reordered"),
+    (17209, "ممیز حساب", "shorter"),
+    (17234, "مهندس الکترونیک هواپیما", "paraphrase"),
+    (17256, "مهندس نرم افزار", "shorter"),
+    (17283, "مهندس شبکه فاضلاب", "paraphrase"),
+    (17304, "مهندس طراحی کشتی سازی", "extra word"),
+    (17334, "نقشه بردار دریایی", "shorter"),
+    (17356, "مونتاژکار زنگ در", "paraphrase"),
+    (17379, "نصاب صندلی وانت و کامیون", "paraphrase"),
+    (17414, "وکیل شاکی در دادگاه", "extra word"),
+    (17444, "دکتر داخلی", "colloquial"),
+    (17471, "کارآگاه پلیس جنایی", "paraphrase"),
+    (17497, "کارشناس روابط بین الملل سازمان", "paraphrase"),
+    (17522, "کارشناس بهداشت صنعتی", "shorter"),
+    (17546, "کارشناس روابط بین‌الملل", "same words"),
+    (17569, "کارشناس امور فرهنگی", "paraphrase"),
+    (17598, "کارشناس نقشه برداری آب", "paraphrase"),
+    (17619, "ظرفشور هتل", "colloquial"),
+    (17649, "کاپیتان کشتی نجات", "paraphrase"),
+    (17674, "گزارشگر مسابقات ورزشی", "paraphrase"),
+    (17706, "مربی پیش دبستانی", "paraphrase"),
+    (17729, "استادیار هیئت علمی", "extra word"),
+    (17759, "اپراتور فرستنده رادیو", "shorter"),
+    (17788, "بازرس کنترل کیفیت", "paraphrase"),
+    (17815, "برنامه ریز مراسم", "paraphrase"),
+    (17843, "تحلیلگر اقتصادی", "spacing"),
+    (17868, "تراشنده شیشه ساعت", "shorter"),
+    (17888, "تعمیرکار پمپ آب", "paraphrase"),
+    (17914, "تعمیرکار لباسشویی خانگی", "paraphrase"),
+    (17939, "تعمیرکار یراق در و پنجره", "extra word"),
+    (17962, "تکنسین لابراتوار ساخت دندان", "paraphrase"),
+    (17991, "تکنسین برآورد هزینه پروژه", "paraphrase"),
+    (18014, "تکنسین مخابرات تلفن", "extra word"),
+    (18037, "تکنسین بخش رادیولوژی", "extra word"),
+    (18062, "تکنسین شیشه گری", "spacing"),
+    (18087, "تکنسین مایکروویو", "colloquial"),
+    (18114, "تکنسین ساخت پل", "paraphrase"),
+    (18138, "تکنسین مهندسی ساختمان", "paraphrase"),
+    (18169, "خلیفه کلیسای مسیحی", "extra word"),
+    (18191, "دانشمند کامپیوتر", "colloquial"),
+    (18218, "دستیار وکیل", "shorter"),
+    (18250, "راننده درزین", "shorter"),
+    (18282, "روغن کار هواپیما", "spacing"),
+    (18314, "رئیس گروه سیار حمل و نقل", "paraphrase"),
+    (18350, "زبان شناس عمومی", "extra word"),
+    (18375, "سازنده وسایل چوب پنبه", "paraphrase"),
+    (18398, "سرپرست تمام کاری کارخانه", "paraphrase"),
+    (18421, "سرکارگر بتن ریزی", "colloquial"),
+    (18441, "سکان دار اسکله بندر", "extra word"),
+    (18468, "شیشه بر ساختمون", "colloquial"),
+    (18510, "طلا زن روی چینی", "spacing"),
+    (18536, "عضو هیئت علمی دانشگاه", "spacing"),
+    (18561, "قالب ریز ظروف سفالی دستی", "shorter"),
+    (18589, "ماساژور سالن زیبایی", "extra word"),
+    (18614, "مامور برج مراقبت فرودگاه", "paraphrase"),
+    (18642, "متخصص بافت شناسی گیاه", "shorter"),
+    (18665, "مدرس ایمنی کارکنان", "paraphrase"),
+    (18691, "دامپزشک پرندگان", "paraphrase"),
+    (18717, "مسئول دبیرخانه", "paraphrase"),
+    (18746, "انباردار", "colloquial"),
+    (18770, "اپراتور بسته بندی دارو", "paraphrase"),
+    (18794, "اپراتور سمباده پلاستیک", "paraphrase"),
+    (18815, "اپراتور چاپ دیجیتال", "paraphrase"),
+    (18840, "اپراتور ضبط ویدیو", "paraphrase"),
+    (18863, "اپراتور چرخ خیاطی چرم", "paraphrase"),
+]
+
+
+def load_titles(path: Path) -> dict[int, str]:
+    workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        sheet = workbook["JobTitles"] if "JobTitles" in workbook.sheetnames else workbook[workbook.sheetnames[0]]
+        rows = sheet.iter_rows(values_only=True)
+        header = next(rows, None)
+        if not header:
+            raise SystemExit(f"{path.name} has no header")
+        columns = [str(cell).strip() if cell is not None else "" for cell in header]
+        id_index = columns.index("id")
+        title_index = columns.index("title")
+        titles: dict[int, str] = {}
+        for values in rows:
+            if values is None or values[id_index] is None:
+                continue
+            raw_id = values[id_index]
+            row_id = int(raw_id) if not isinstance(raw_id, str) else int(raw_id.strip())
+            title = "" if values[title_index] is None else str(values[title_index]).strip()
+            titles[row_id] = title
+        return titles
+    finally:
+        workbook.close()
+
+
+def main() -> None:
+    if len(QUERIES) != 200:
+        raise SystemExit(f"expected 200 queries, found {len(QUERIES)}")
+    ids = [row_id for row_id, _, _ in QUERIES]
+    if len(ids) != len(set(ids)):
+        raise SystemExit("duplicate gold id in the query list")
+
+    titles = load_titles(SOURCE_XLSX)
+    missing = [row_id for row_id in ids if row_id not in titles]
+    if missing:
+        raise SystemExit(f"ids not in the spreadsheet: {missing}")
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "ValidationQueries"
+    sheet.append(["query", "gold_id", "gold_title", "change"])
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+    for row_id, query, change in QUERIES:
+        sheet.append([query, row_id, titles[row_id], change])
+    sheet.auto_filter.ref = sheet.dimensions
+    sheet.freeze_panes = "A2"
+    for column, width in {"A": 48, "B": 12, "C": 56, "D": 16}.items():
+        sheet.column_dimensions[column].width = width
+    workbook.save(OUTPUT_XLSX)
+    print(f"wrote {len(QUERIES)} rows to {OUTPUT_XLSX.name}")
+
+
+if __name__ == "__main__":
+    main()
