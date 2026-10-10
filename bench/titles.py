@@ -1,6 +1,6 @@
 """Load titles, normalize them, and import embeddings into Milvus with a resume checkpoint.
 
-Each model script keeps its own checkpoint database and its own collection.
+Each model keeps its own checkpoint database and its own collection.
 A batch is committed to SQLite only after that step has succeeded:
 
 1. The provider returns vectors, they are truncated to the target dimension,
@@ -15,7 +15,6 @@ and it continues from the first unfinished row.
 from __future__ import annotations
 
 import logging
-import os
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -25,37 +24,17 @@ from typing import Any, Callable
 
 import numpy as np
 import openpyxl
-import requests
 from pymilvus import DataType, MilvusClient
 
-from text_cleaner import clean_text_readable
+from bench.env import env_str, milvus_uri, resolve_path, setup_logging
+from bench.providers import EmbedError
+from bench.vectors import fit_embedding
+from bench.text_cleaner import clean_text_readable
 
-ROOT = Path(__file__).resolve().parent
 VARCHAR_MAX_LENGTH = 65535
 EMPTY_TEXT_ERROR = "empty_after_normalize"
 
 EmbedFn = Callable[[list[str]], list[list[float]]]
-
-
-class EmbedError(Exception):
-    """A provider call failed.
-
-    fatal: stop the whole run (authentication, unexpected response).
-    split: the batch itself was rejected, so try smaller batches.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        status: int | None,
-        fatal: bool,
-        split: bool,
-    ) -> None:
-        super().__init__(message)
-        self.status = status
-        self.fatal = fatal
-        self.split = split
 
 
 @dataclass(frozen=True)
@@ -83,180 +62,6 @@ class RunStats:
     embedded: int
     inserted: int
     failed: int
-
-
-def load_environment() -> None:
-    from dotenv import load_dotenv
-
-    load_dotenv(ROOT / ".env")
-
-
-def env_str(name: str) -> str:
-    value = os.environ.get(name, "").strip()
-    if not value:
-        raise SystemExit(f"Missing {name} in .env")
-    return value
-
-
-def env_int(name: str) -> int:
-    raw = env_str(name)
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise SystemExit(f"{name} must be an integer, got {raw!r}") from exc
-    if value <= 0:
-        raise SystemExit(f"{name} must be greater than 0, got {value}")
-    return value
-
-
-def resolve_path(value: str) -> Path:
-    path = Path(value)
-    if not path.is_absolute():
-        path = ROOT / path
-    return path
-
-
-def setup_logging(log_name: str) -> logging.Logger:
-    level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_name, None)
-    if not isinstance(level, int):
-        raise SystemExit(f"LOG_LEVEL must be a logging level, got {level_name!r}")
-
-    logger = logging.getLogger(log_name)
-    logger.handlers.clear()
-    logger.setLevel(level)
-    logger.propagate = False
-    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-
-    stream = logging.StreamHandler()
-    stream.setFormatter(formatter)
-    logger.addHandler(stream)
-
-    log_dir = ROOT / "logs"
-    log_dir.mkdir(exist_ok=True)
-    file_handler = logging.FileHandler(log_dir / f"{log_name}.log", encoding="utf-8")
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-    return logger
-
-
-def milvus_uri() -> str:
-    host = env_str("MILVUS_HOST")
-    if host.startswith("http://") or host.startswith("https://"):
-        return host
-    return f"http://{host}:{env_str('MILVUS_PORT')}"
-
-
-def request_json(
-    session: requests.Session,
-    url: str,
-    *,
-    headers: dict[str, str],
-    body: dict[str, Any],
-    timeout: int,
-    max_retries: int,
-    logger: logging.Logger,
-) -> Any:
-    """POST JSON and retry rate limits and transient server errors."""
-    delay = 2.0
-    for attempt in range(1, max_retries + 1):
-        try:
-            response = session.post(url, headers=headers, json=body, timeout=timeout)
-        except requests.RequestException as exc:
-            logger.warning("request failed, attempt %s/%s: %s", attempt, max_retries, exc)
-            if attempt == max_retries:
-                raise EmbedError(str(exc), status=None, fatal=False, split=False) from exc
-            time.sleep(delay)
-            delay = min(delay * 2, 60)
-            continue
-
-        if response.status_code == 200:
-            try:
-                return response.json()
-            except ValueError as exc:
-                snippet = response.text[:300].replace("\n", " ")
-                raise EmbedError(
-                    f"response was not JSON: {snippet}",
-                    status=200,
-                    fatal=True,
-                    split=False,
-                ) from exc
-
-        snippet = response.text[:500].replace("\n", " ")
-        logger.warning(
-            "HTTP %s from %s, attempt %s/%s: %s",
-            response.status_code,
-            url,
-            attempt,
-            max_retries,
-            snippet,
-        )
-        if response.status_code in {401, 403}:
-            raise EmbedError(snippet, status=response.status_code, fatal=True, split=False)
-        if response.status_code in {400, 413, 422}:
-            raise EmbedError(snippet, status=response.status_code, fatal=False, split=True)
-        if response.status_code in {429, 500, 502, 503, 504}:
-            if attempt == max_retries:
-                raise EmbedError(snippet, status=response.status_code, fatal=False, split=False)
-            retry_after = response.headers.get("Retry-After")
-            sleep_for = delay
-            if retry_after:
-                try:
-                    sleep_for = min(float(retry_after), 120.0)
-                except ValueError:
-                    sleep_for = delay
-            time.sleep(sleep_for)
-            delay = min(delay * 2, 60)
-            continue
-        raise EmbedError(snippet, status=response.status_code, fatal=True, split=False)
-
-    raise EmbedError("request retry loop ended without a response", status=None, fatal=False, split=False)
-
-
-def vectors_from_openai_payload(payload: Any, count: int) -> list[list[float]]:
-    """Read an OpenAI-style embeddings response, ordered by the `index` field."""
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(data, list):
-        raise EmbedError("response has no embedding data list", status=200, fatal=True, split=False)
-    try:
-        ordered = sorted(data, key=lambda item: item["index"])
-    except (TypeError, KeyError) as exc:
-        raise EmbedError(f"embedding items have no index: {exc}", status=200, fatal=True, split=False) from exc
-    indexes = [item.get("index") for item in ordered]
-    if indexes != list(range(count)):
-        raise EmbedError(
-            f"unexpected embedding indexes {indexes}",
-            status=200,
-            fatal=False,
-            split=True,
-        )
-    vectors: list[list[float]] = []
-    for item in ordered:
-        vector = item.get("embedding")
-        if not isinstance(vector, list):
-            raise EmbedError("embedding field is not a list", status=200, fatal=False, split=True)
-        vectors.append(vector)
-    return vectors
-
-
-def fit_embedding(values: list[float], dimension: int) -> tuple[list[float], int]:
-    """Keep the first `dimension` values, then L2-normalize.
-
-    Both models are trained with Matryoshka learning. Truncation has to happen
-    before normalization, including when the provider already normalized the
-    full vector.
-    """
-    incoming = len(values)
-    if incoming < dimension:
-        raise ValueError(f"provider returned {incoming} dimensions, need at least {dimension}")
-    array = np.asarray(values[:dimension], dtype=np.float64)
-    if not np.isfinite(array).all():
-        raise ValueError("embedding contains NaN or infinity")
-    norm = float(np.linalg.norm(array))
-    if norm == 0.0:
-        raise ValueError("embedding norm is zero")
-    unit = (array / norm).tolist()
-    return unit, incoming
 
 
 def _parse_row_id(value: Any, excel_row: int) -> int:

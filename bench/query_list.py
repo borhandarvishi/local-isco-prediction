@@ -1,26 +1,11 @@
-"""Build 200 human-typed job queries for retrieval validation.
+"""The 200 hand-written validation queries.
 
-Each query is something a person might type. It stays close to one official
-title in the spreadsheet, and that title's id is the expected match.
-The queries are not passed through the cleaner. Normalize them the same way
-as the indexed titles before you embed a search.
-
-Run:
-    python generate_validation_queries.py
+Each item is (gold_id, query a person might type, kind of change).
+The official title is filled in from the spreadsheet when the workbook is built.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import openpyxl
-from openpyxl.styles import Font
-
-ROOT = Path(__file__).resolve().parent
-SOURCE_XLSX = ROOT / "test_data_for_local_embedding_models.xlsx"
-OUTPUT_XLSX = ROOT / "validation_human_job_queries.xlsx"
-
-# gold_id, query a person might type, what kind of change it is.
 QUERIES: list[tuple[int, str, str]] = [
     (16227, "غوره گیر دستی", "shorter"),
     (16253, "متخصص ارتز و بریس", "paraphrase"),
@@ -223,59 +208,3 @@ QUERIES: list[tuple[int, str, str]] = [
     (18840, "اپراتور ضبط ویدیو", "paraphrase"),
     (18863, "اپراتور چرخ خیاطی چرم", "paraphrase"),
 ]
-
-
-def load_titles(path: Path) -> dict[int, str]:
-    workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    try:
-        sheet = workbook["JobTitles"] if "JobTitles" in workbook.sheetnames else workbook[workbook.sheetnames[0]]
-        rows = sheet.iter_rows(values_only=True)
-        header = next(rows, None)
-        if not header:
-            raise SystemExit(f"{path.name} has no header")
-        columns = [str(cell).strip() if cell is not None else "" for cell in header]
-        id_index = columns.index("id")
-        title_index = columns.index("title")
-        titles: dict[int, str] = {}
-        for values in rows:
-            if values is None or values[id_index] is None:
-                continue
-            raw_id = values[id_index]
-            row_id = int(raw_id) if not isinstance(raw_id, str) else int(raw_id.strip())
-            title = "" if values[title_index] is None else str(values[title_index]).strip()
-            titles[row_id] = title
-        return titles
-    finally:
-        workbook.close()
-
-
-def main() -> None:
-    if len(QUERIES) != 200:
-        raise SystemExit(f"expected 200 queries, found {len(QUERIES)}")
-    ids = [row_id for row_id, _, _ in QUERIES]
-    if len(ids) != len(set(ids)):
-        raise SystemExit("duplicate gold id in the query list")
-
-    titles = load_titles(SOURCE_XLSX)
-    missing = [row_id for row_id in ids if row_id not in titles]
-    if missing:
-        raise SystemExit(f"ids not in the spreadsheet: {missing}")
-
-    workbook = openpyxl.Workbook()
-    sheet = workbook.active
-    sheet.title = "ValidationQueries"
-    sheet.append(["query", "gold_id", "gold_title", "change"])
-    for cell in sheet[1]:
-        cell.font = Font(bold=True)
-    for row_id, query, change in QUERIES:
-        sheet.append([query, row_id, titles[row_id], change])
-    sheet.auto_filter.ref = sheet.dimensions
-    sheet.freeze_panes = "A2"
-    for column, width in {"A": 48, "B": 12, "C": 56, "D": 16}.items():
-        sheet.column_dimensions[column].width = width
-    workbook.save(OUTPUT_XLSX)
-    print(f"wrote {len(QUERIES)} rows to {OUTPUT_XLSX.name}")
-
-
-if __name__ == "__main__":
-    main()

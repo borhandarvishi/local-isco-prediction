@@ -222,3 +222,4 @@ __marimo__/
 # Embedding benchmark progress and logs
 checkpoints/
 logs/
+~$*

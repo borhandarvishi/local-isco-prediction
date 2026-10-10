@@ -1,78 +1,25 @@
-"""Embed the validation query column with F2LLM-v2-4B and save 1024-d vectors.
+"""Embed validation queries and save 1024-d vectors. Nothing is written to Milvus.
 
-Reads validation_human_job_queries.xlsx. Each query is normalized with
-clean_text_readable, the same cleaner used for the indexed titles, then sent
-to the Hugging Face endpoint. The returned vector is cut to EMBEDDING_DIM and
-L2-normalized. Nothing is written to Milvus.
-
-The output is one NumPy file, validation_f2llm_query_vectors.npz:
-
-    vectors            float32 [n, 1024]
-    gold_id            int64   [n]
-    query              unicode [n]   original typed query
-    query_normalized   unicode [n]   text that was embedded
-    gold_title         unicode [n]
-
-Finished rows are stored in a SQLite checkpoint first, so stopping the script
-does not lose vectors already returned by the endpoint.
-
-Run:
-    python embed_validation_queries_f2llm.py
+F2LLM is the only model with its own query-embed command, because those vectors
+are produced by the paid Hugging Face endpoint and are reused by retrieval.
+Qwen and OpenAI query vectors are created on demand by `bench.retrieve`.
 """
 
 from __future__ import annotations
 
-import logging
 import sqlite3
 from pathlib import Path
 
 import numpy as np
-import openpyxl
 
-from embed_f2llm_v2_4b import HuggingFaceEmbeddings, require_endpoint
-from embedding_pipeline import env_int, fit_embedding, load_environment, setup_logging
-from text_cleaner import clean_text_readable
+from bench.env import F2LLM_QUERY_VECTORS, ROOT, env_int, load_environment, setup_logging, share_logs
+from bench.providers import LOGGER_F2LLM, f2llm_client
+from bench.validation_set import QUERY_XLSX, read_queries
+from bench.vectors import fit_embedding
 
-ROOT = Path(__file__).resolve().parent
-QUERY_XLSX = ROOT / "validation_human_job_queries.xlsx"
-VECTOR_NPZ = ROOT / "validation_f2llm_query_vectors.npz"
+VECTOR_NPZ = F2LLM_QUERY_VECTORS
 CHECKPOINT_DB = ROOT / "checkpoints" / "f2llm_validation_queries.sqlite"
 LOG_NAME = "f2llm_validation_queries"
-
-
-def read_queries(path: Path) -> list[dict[str, object]]:
-    if not path.is_file():
-        raise SystemExit(f"Query file not found: {path.name}. Run generate_validation_queries.py first.")
-    workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    try:
-        sheet = workbook.active
-        rows = sheet.iter_rows(values_only=True)
-        header = [str(cell).strip() if cell is not None else "" for cell in next(rows)]
-        columns = {name: index for index, name in enumerate(header)}
-        for required in ("query", "gold_id", "gold_title"):
-            if required not in columns:
-                raise SystemExit(f"{path.name} is missing a {required} column")
-        records = []
-        for values in rows:
-            if values is None or values[columns["query"]] is None:
-                continue
-            query = str(values[columns["query"]]).strip()
-            if not query:
-                continue
-            raw_id = values[columns["gold_id"]]
-            gold_id = int(raw_id) if not isinstance(raw_id, str) else int(str(raw_id).strip())
-            gold_title = "" if values[columns["gold_title"]] is None else str(values[columns["gold_title"]]).strip()
-            records.append(
-                {
-                    "gold_id": gold_id,
-                    "query": query,
-                    "query_normalized": clean_text_readable(query),
-                    "gold_title": gold_title,
-                }
-            )
-        return records
-    finally:
-        workbook.close()
 
 
 class QueryCheckpoint:
@@ -165,7 +112,7 @@ class QueryCheckpoint:
                 payload,
             )
 
-    def export_rows(self, dimension: int) -> list[sqlite3.Row]:
+    def export_rows(self) -> list[sqlite3.Row]:
         self.conn.row_factory = sqlite3.Row
         return list(
             self.conn.execute(
@@ -190,6 +137,7 @@ def write_npz(rows: list[sqlite3.Row], dimension: int, path: Path) -> None:
     )
     if vectors.shape != (len(rows), dimension):
         raise SystemExit(f"vector matrix shape is {vectors.shape}, expected {(len(rows), dimension)}")
+    path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
         path,
         vectors=vectors,
@@ -200,16 +148,11 @@ def write_npz(rows: list[sqlite3.Row], dimension: int, path: Path) -> None:
     )
 
 
-def main() -> int:
+def embed_f2llm_queries() -> int:
     load_environment()
     logger = setup_logging(LOG_NAME)
-    endpoint_logger = logging.getLogger("f2llm_v2_4b")
-    endpoint_logger.setLevel(logger.level)
-    endpoint_logger.propagate = False
-    for handler in logger.handlers:
-        endpoint_logger.addHandler(handler)
-    token, endpoint = require_endpoint()
-    client = HuggingFaceEmbeddings(token, endpoint)
+    share_logs(logger, LOGGER_F2LLM)
+    client = f2llm_client()
     dimension = client.dimension
     batch_size = env_int("F2LLM_EMBED_BATCH_SIZE")
 
@@ -244,14 +187,9 @@ def main() -> int:
                 incoming,
                 dimension,
             )
-        rows = checkpoint.export_rows(dimension)
-        write_npz(rows, dimension, VECTOR_NPZ)
+        write_npz(checkpoint.export_rows(), dimension, VECTOR_NPZ)
     finally:
         checkpoint.close()
 
     logger.info("wrote %s vectors to %s", len(records), VECTOR_NPZ.name)
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
